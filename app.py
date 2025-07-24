@@ -145,55 +145,99 @@ class SupabaseConnector:
             return [], f"Fetch error: {str(e)}"
     
     def create_tables(self):
-        """Create necessary tables (requires service key)"""
-        if not self.service_key:
-            return False, "Service key required for table creation"
-            
-        try:
-            # SQL to create trades table
-            create_table_sql = """
-            CREATE TABLE IF NOT EXISTS trades (
-                id SERIAL PRIMARY KEY,
-                symbol VARCHAR(20) NOT NULL,
-                side VARCHAR(10) NOT NULL,
-                quantity DECIMAL(18,8) NOT NULL,
-                price DECIMAL(18,8) NOT NULL,
-                timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                strategy VARCHAR(50),
-                pnl DECIMAL(18,8),
-                status VARCHAR(20) DEFAULT 'completed'
-            );
-            
-            CREATE TABLE IF NOT EXISTS portfolio (
-                id SERIAL PRIMARY KEY,
-                symbol VARCHAR(20) NOT NULL,
-                quantity DECIMAL(18,8) NOT NULL,
-                avg_price DECIMAL(18,8) NOT NULL,
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            );
-            """
-            
-            headers = {
-                'apikey': self.service_key,
-                'Authorization': f'Bearer {self.service_key}',
-                'Content-Type': 'application/json'
-            }
-            
-            # Execute SQL using PostgREST
-            response = requests.post(
-                f"{self.url}/rest/v1/rpc/sql",
-                headers=headers,
-                json={"query": create_table_sql},
-                timeout=30
-            )
-            
-            if response.status_code in [200, 204]:
-                return True, "Tables created successfully"
-            else:
-                return False, f"Table creation failed: {response.text}"
-                
-        except Exception as e:
-            return False, f"Table creation error: {str(e)}"
+        """Create necessary tables - Returns SQL for manual execution"""
+        sql_script = """
+-- Create trades table
+CREATE TABLE IF NOT EXISTS public.trades (
+    id BIGSERIAL PRIMARY KEY,
+    symbol VARCHAR(20) NOT NULL,
+    side VARCHAR(10) NOT NULL CHECK (side IN ('buy', 'sell')),
+    quantity DECIMAL(18,8) NOT NULL,
+    price DECIMAL(18,8) NOT NULL,
+    timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    strategy VARCHAR(50),
+    pnl DECIMAL(18,8),
+    status VARCHAR(20) DEFAULT 'completed',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Create portfolio table
+CREATE TABLE IF NOT EXISTS public.portfolio (
+    id BIGSERIAL PRIMARY KEY,
+    symbol VARCHAR(20) NOT NULL UNIQUE,
+    quantity DECIMAL(18,8) NOT NULL DEFAULT 0,
+    avg_price DECIMAL(18,8) NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Create trading_sessions table
+CREATE TABLE IF NOT EXISTS public.trading_sessions (
+    id BIGSERIAL PRIMARY KEY,
+    session_start TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    session_end TIMESTAMP WITH TIME ZONE,
+    total_trades INTEGER DEFAULT 0,
+    total_pnl DECIMAL(18,8) DEFAULT 0,
+    strategy VARCHAR(50),
+    active BOOLEAN DEFAULT TRUE
+);
+
+-- Enable Row Level Security (RLS)
+ALTER TABLE public.trades ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.portfolio ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.trading_sessions ENABLE ROW LEVEL SECURITY;
+
+-- Create policies for anon access (adjust as needed for production)
+CREATE POLICY "Allow anon to read trades" ON public.trades
+    FOR SELECT USING (true);
+
+CREATE POLICY "Allow anon to insert trades" ON public.trades
+    FOR INSERT WITH CHECK (true);
+
+CREATE POLICY "Allow anon to read portfolio" ON public.portfolio
+    FOR ALL USING (true);
+
+CREATE POLICY "Allow anon to manage sessions" ON public.trading_sessions
+    FOR ALL USING (true);
+
+-- Create indexes for better performance
+CREATE INDEX IF NOT EXISTS idx_trades_symbol ON public.trades(symbol);
+CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON public.trades(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_portfolio_symbol ON public.portfolio(symbol);
+
+-- Create a function to update portfolio automatically
+CREATE OR REPLACE FUNCTION update_portfolio()
+RETURNS TRIGGER AS $
+BEGIN
+    -- Update portfolio when new trade is inserted
+    INSERT INTO public.portfolio (symbol, quantity, avg_price, updated_at)
+    VALUES (
+        NEW.symbol,
+        CASE WHEN NEW.side = 'buy' THEN NEW.quantity ELSE -NEW.quantity END,
+        NEW.price,
+        NEW.timestamp
+    )
+    ON CONFLICT (symbol) DO UPDATE SET
+        quantity = portfolio.quantity + CASE WHEN NEW.side = 'buy' THEN NEW.quantity ELSE -NEW.quantity END,
+        avg_price = CASE 
+            WHEN (portfolio.quantity + CASE WHEN NEW.side = 'buy' THEN NEW.quantity ELSE -NEW.quantity END) = 0 THEN 0
+            ELSE (portfolio.avg_price * portfolio.quantity + NEW.price * CASE WHEN NEW.side = 'buy' THEN NEW.quantity ELSE -NEW.quantity END) / 
+                 (portfolio.quantity + CASE WHEN NEW.side = 'buy' THEN NEW.quantity ELSE -NEW.quantity END)
+        END,
+        updated_at = NEW.timestamp;
+    
+    RETURN NEW;
+END;
+$ LANGUAGE plpgsql;
+
+-- Create trigger to auto-update portfolio
+DROP TRIGGER IF EXISTS trigger_update_portfolio ON public.trades;
+CREATE TRIGGER trigger_update_portfolio
+    AFTER INSERT ON public.trades
+    FOR EACH ROW
+    EXECUTE FUNCTION update_portfolio();
+"""
+        
+        return True, sql_script
 
 # Page configuration
 st.set_page_config(
@@ -385,7 +429,7 @@ with tab2:
                     'price': round(np.random.uniform(100, 50000), 2),
                     'strategy': strategy,
                     'pnl': round(np.random.uniform(-100, 200), 2),
-                    'timestamp': datetime.now().isoformat()
+                    'trade_timestamp': datetime.now().isoformat()
                 }
                 
                 with st.spinner("Saving trade to database..."):
@@ -545,7 +589,7 @@ with tab4:
                     'quantity': 1.0,
                     'price': 100.0,
                     'strategy': 'test',
-                    'timestamp': datetime.now().isoformat()
+                    'trade_timestamp': datetime.now().isoformat()
                 }
                 
                 success, message = st.session_state.supabase_connector.insert_trade(test_data)
@@ -566,35 +610,130 @@ with tab4:
     
     # Handle table creation
     if create_tables_clicked:
-        if service_key:
-            with st.spinner("Creating database tables..."):
-                success, message = st.session_state.supabase_connector.create_tables()
-                if success:
-                    st.success(f"✅ {message}")
-                else:
-                    st.error(f"❌ {message}")
-        else:
-            st.error("❌ Service key is required for table creation")
+        with st.spinner("Generating SQL script..."):
+            success, sql_script = st.session_state.supabase_connector.create_tables()
+            if success:
+                st.success("✅ SQL script generated! Copy and run this in your Supabase SQL editor:")
+                
+                # Display SQL script in a code block
+                st.code(sql_script, language='sql')
+                
+                # Instructions
+                st.info("""
+                **To execute this SQL:**
+                1. Go to your Supabase dashboard
+                2. Click on 'SQL Editor' in the left sidebar
+                3. Click 'New Query'
+                4. Copy and paste the SQL code above
+                5. Click 'Run' to execute
+                6. Come back here and test the connection!
+                """)
+                
+                # Option to download SQL file
+                st.download_button(
+                    label="📥 Download SQL Script",
+                    data=sql_script,
+                    file_name="autotrader_tables.sql",
+                    mime="text/plain"
+                )
+            else:
+                st.error(f"❌ {sql_script}")
+    
+    # Quick setup guide
+    with st.expander("🚀 Quick Setup Guide"):
+        st.markdown("""
+        **Step-by-step setup:**
+        
+        1. **Get Supabase credentials:**
+           - Go to your Supabase project dashboard
+           - Settings → API
+           - Copy your URL and anon key
+        
+        2. **Connect to database:**
+           - Paste URL and anon key above
+           - Click "🔌 Connect"
+        
+        3. **Create tables:**
+           - Click "📋 Create Tables"
+           - Copy the SQL script
+           - Run it in Supabase SQL Editor
+        
+        4. **Test everything:**
+           - Click "🧪 Test Connection"
+           - Should show successful read/write
+        
+        5. **Start trading:**
+           - Go to main dashboard
+           - Click "🚀 Start Trading"
+           - Your trades will be saved automatically!
+        """)
+    
+    # Manual SQL option
+    with st.expander("📝 Manual Table Creation (Alternative)"):
+        st.markdown("""
+        If you prefer to create tables manually, here's the minimum required:
+        
+        ```sql
+        -- Basic trades table
+        CREATE TABLE public.trades (
+            id BIGSERIAL PRIMARY KEY,
+            symbol VARCHAR(20) NOT NULL,
+            side VARCHAR(10) NOT NULL,
+            quantity DECIMAL(18,8) NOT NULL,
+            price DECIMAL(18,8) NOT NULL,
+            timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            strategy VARCHAR(50),
+            pnl DECIMAL(18,8)
+        );
+        
+        -- Enable public access (for demo - adjust for production)
+        ALTER TABLE public.trades ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY "Allow anon access" ON public.trades FOR ALL USING (true);
+        ```
+        """)
+    
+    # Connection health check
+    if st.session_state.supabase_connected:
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🔄 Reload Trades"):
+                with st.spinner("Fetching latest trades..."):
+                    trades, message = st.session_state.supabase_connector.get_trades(5)
+                    if trades:
+                        st.success(f"✅ Found {len(trades)} recent trades")
+                    else:
+                        st.info("📝 No trades in database yet")
+        
+        with col2:
+            if st.button("🧹 Clear Test Data"):
+                st.warning("⚠️ This would clear test trades (not implemented for safety)")
     
     # Display recent trades if connected
     if st.session_state.supabase_connected:
         st.subheader("📊 Recent Trades from Database")
         
-        if st.button("🔄 Refresh Trades"):
-            with st.spinner("Fetching trades..."):
-                trades, message = st.session_state.supabase_connector.get_trades(10)
-                if trades:
-                    trades_df = pd.DataFrame(trades)
-                    if not trades_df.empty:
-                        # Format the dataframe for display
-                        if 'timestamp' in trades_df.columns:
-                            trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
-                        
-                        st.dataframe(trades_df, use_container_width=True)
-                    else:
-                        st.info("📝 No trades found in database")
+        trades, message = st.session_state.supabase_connector.get_trades(10)
+        if trades:
+            trades_df = pd.DataFrame(trades)
+            if not trades_df.empty:
+                # Format the dataframe for display
+                if 'trade_timestamp' in trades_df.columns:
+                    trades_df['trade_timestamp'] = pd.to_datetime(trades_df['trade_timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+                
+                # Select relevant columns for display
+                display_cols = ['symbol', 'side', 'quantity', 'price', 'pnl', 'strategy', 'trade_timestamp']
+                available_cols = [col for col in display_cols if col in trades_df.columns]
+                
+                if available_cols:
+                    st.dataframe(trades_df[available_cols], use_container_width=True)
                 else:
-                    st.warning(f"⚠️ {message}")
+                    st.dataframe(trades_df, use_container_width=True)
+            else:
+                st.info("📝 No trades found in database")
+        else:
+            st.warning(f"⚠️ {message}")
     
     st.markdown("---")
     
