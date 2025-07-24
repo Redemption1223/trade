@@ -16,8 +16,13 @@ except ImportError:
 try:
     from supabase import create_client, Client
     SUPABASE_AVAILABLE = True
-except ImportError:
+    supabase_error = None
+except ImportError as e:
     SUPABASE_AVAILABLE = False
+    supabase_error = str(e)
+except Exception as e:
+    SUPABASE_AVAILABLE = False
+    supabase_error = f"Supabase import error: {str(e)}"
 
 # Page configuration
 st.set_page_config(
@@ -353,7 +358,30 @@ with tab4:
     st.subheader("Database Configuration (Supabase)")
     
     if not SUPABASE_AVAILABLE:
-        st.error("⚠️ Supabase library not installed. Add 'supabase' to your requirements.txt file.")
+        st.error(f"⚠️ Supabase library issue: {supabase_error}")
+        st.info("💡 **Troubleshooting Steps:**")
+        st.markdown("""
+        1. **Redeploy your app** after updating requirements.txt
+        2. **Check requirements.txt** contains: `supabase>=2.3.0`
+        3. **Wait 2-3 minutes** for dependencies to install
+        4. **Try rebooting** your Streamlit app if using Streamlit Cloud
+        """)
+        
+        # Show debug info
+        with st.expander("🔍 Debug Information"):
+            st.write("Python packages that are available:")
+            import sys
+            available_packages = [module for module in sys.modules.keys() if not module.startswith('_')]
+            st.write(f"Total packages loaded: {len(available_packages)}")
+            
+            # Check if any supabase-related packages are available
+            supabase_packages = [pkg for pkg in available_packages if 'supabase' in pkg.lower()]
+            if supabase_packages:
+                st.write(f"Supabase-related packages found: {supabase_packages}")
+            else:
+                st.write("No supabase packages detected")
+    else:
+        st.success("✅ Supabase library loaded successfully!")
     
     # Supabase connection settings
     col1, col2 = st.columns(2)
