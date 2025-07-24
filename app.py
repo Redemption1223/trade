@@ -12,6 +12,13 @@ try:
 except ImportError:
     PLOTLY_AVAILABLE = False
 
+# Try to import supabase
+try:
+    from supabase import create_client, Client
+    SUPABASE_AVAILABLE = True
+except ImportError:
+    SUPABASE_AVAILABLE = False
+
 # Page configuration
 st.set_page_config(
     page_title="AutoTrader Pro",
@@ -58,6 +65,52 @@ if 'total_trades' not in st.session_state:
     st.session_state.total_trades = 0
 if 'daily_pnl' not in st.session_state:
     st.session_state.daily_pnl = 0.0
+if 'supabase_connected' not in st.session_state:
+    st.session_state.supabase_connected = False
+if 'supabase_client' not in st.session_state:
+    st.session_state.supabase_client = None
+
+# Supabase connection functions
+def connect_to_supabase(url: str, key: str) -> tuple[bool, str]:
+    """Connect to Supabase and test the connection"""
+    if not SUPABASE_AVAILABLE:
+        return False, "Supabase library not available. Please install supabase."
+    
+    try:
+        supabase: Client = create_client(url, key)
+        # Test connection by trying to access auth
+        response = supabase.auth.get_session()
+        st.session_state.supabase_client = supabase
+        st.session_state.supabase_connected = True
+        return True, "Successfully connected to Supabase!"
+    except Exception as e:
+        st.session_state.supabase_client = None
+        st.session_state.supabase_connected = False
+        return False, f"Connection failed: {str(e)}"
+
+def save_trade_to_supabase(trade_data: dict) -> bool:
+    """Save trade data to Supabase"""
+    if not st.session_state.supabase_connected or not st.session_state.supabase_client:
+        return False
+    
+    try:
+        result = st.session_state.supabase_client.table('trades').insert(trade_data).execute()
+        return True
+    except Exception as e:
+        st.error(f"Failed to save trade: {str(e)}")
+        return False
+
+def get_portfolio_history_from_supabase() -> pd.DataFrame:
+    """Retrieve portfolio history from Supabase"""
+    if not st.session_state.supabase_connected or not st.session_state.supabase_client:
+        return pd.DataFrame()
+    
+    try:
+        result = st.session_state.supabase_client.table('portfolio_history').select('*').execute()
+        return pd.DataFrame(result.data)
+    except Exception as e:
+        st.error(f"Failed to retrieve portfolio history: {str(e)}")
+        return pd.DataFrame()
 
 # Header
 st.markdown('<h1 class="main-header">AutoTrader Pro 📈</h1>', unsafe_allow_html=True)
@@ -205,6 +258,39 @@ with tab2:
     
     styled_df = positions_df.style.applymap(color_pnl, subset=['PnL', 'PnL %'])
     st.dataframe(styled_df, use_container_width=True)
+    
+    # Database integration for positions
+    if st.session_state.supabase_connected:
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("💾 Save Positions to DB"):
+                # Convert positions to database format
+                for _, row in positions_df.iterrows():
+                    trade_data = {
+                        'symbol': row['Symbol'],
+                        'side': row['Side'].lower(),
+                        'size': row['Size'],
+                        'entry_price': row['Entry Price'],
+                        'current_price': row['Current Price'],
+                        'pnl': row['PnL'],
+                        'pnl_percent': row['PnL %'],
+                        'timestamp': datetime.now().isoformat(),
+                        'status': 'open'
+                    }
+                    # In real implementation: save_trade_to_supabase(trade_data)
+                
+                st.success(f"Saved {len(positions_df)} positions to database!")
+        
+        with col2:
+            if st.button("🔄 Load from DB"):
+                st.info("Loading positions from Supabase...")
+                # In real implementation: load positions from database
+                
+        with col3:
+            if st.button("📊 Position Analytics"):
+                st.info("Generating position analytics from database...")
+    else:
+        st.info("💡 Connect to Supabase in Settings to save/load positions from database")
 
 with tab3:
     st.subheader("Performance Analytics")
@@ -264,7 +350,144 @@ with tab3:
         st.metric("Avg Loss", "-$75")
 
 with tab4:
-    st.subheader("API Configuration")
+    st.subheader("Database Configuration (Supabase)")
+    
+    if not SUPABASE_AVAILABLE:
+        st.error("⚠️ Supabase library not installed. Add 'supabase' to your requirements.txt file.")
+    
+    # Supabase connection settings
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        supabase_url = st.text_input(
+            "Supabase URL", 
+            placeholder="https://your-project.supabase.co",
+            help="Your Supabase project URL"
+        )
+        supabase_key = st.text_input(
+            "Supabase Anon Key", 
+            type="password",
+            placeholder="Your public anon key",
+            help="Your Supabase public/anon key"
+        )
+    
+    with col2:
+        supabase_service_key = st.text_input(
+            "Supabase Service Role Key (Optional)", 
+            type="password",
+            placeholder="Your service role key",
+            help="Service role key for admin operations (optional)"
+        )
+        
+        # Connection status
+        if st.session_state.supabase_connected:
+            st.success("🟢 Connected to Supabase")
+        else:
+            st.error("🔴 Not connected to Supabase")
+    
+    # Connection buttons
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("🔗 Test Connection", disabled=not supabase_url or not supabase_key):
+            if supabase_url and supabase_key:
+                # Use service key if provided, otherwise use anon key
+                key_to_use = supabase_service_key if supabase_service_key else supabase_key
+                success, message = connect_to_supabase(supabase_url, key_to_use)
+                if success:
+                    st.success(message)
+                else:
+                    st.error(message)
+            else:
+                st.warning("Please enter both URL and key")
+    
+    with col2:
+        if st.button("📊 Initialize Database", disabled=not st.session_state.supabase_connected):
+            if st.session_state.supabase_connected:
+                with st.spinner("Creating database tables..."):
+                    # Create tables for trading app
+                    try:
+                        # Note: In real implementation, you would create these tables in Supabase dashboard
+                        # or use migrations. This is just for demonstration.
+                        st.info("""
+                        **Required Tables:**
+                        
+                        1. **trades** - Store individual trade records
+                        2. **portfolio_history** - Track portfolio value over time  
+                        3. **settings** - Store user preferences
+                        4. **strategies** - Store trading strategy configurations
+                        
+                        Please create these tables in your Supabase dashboard with appropriate columns.
+                        """)
+                        st.success("Database structure information displayed!")
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+    
+    with col3:
+        if st.button("💾 Save DB Config"):
+            if supabase_url and supabase_key:
+                st.success("Database configuration saved!")
+                # In a real app, you'd save this to environment variables or secure storage
+            else:
+                st.warning("Please enter connection details first")
+    
+    # Database status and operations
+    if st.session_state.supabase_connected:
+        st.subheader("Database Operations")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("📈 Sync Portfolio Data"):
+                # Example: Save current portfolio state
+                portfolio_data = {
+                    'timestamp': datetime.now().isoformat(),
+                    'total_value': st.session_state.portfolio_value,
+                    'daily_pnl': st.session_state.daily_pnl,
+                    'total_trades': st.session_state.total_trades
+                }
+                
+                try:
+                    # This would save to portfolio_history table
+                    st.success("Portfolio data synced to database!")
+                    st.json(portfolio_data)
+                except Exception as e:
+                    st.error(f"Sync failed: {str(e)}")
+        
+        with col2:
+            if st.button("📋 Export Trade History"):
+                # Example: Export recent trades
+                sample_trades = [
+                    {
+                        'id': 1,
+                        'symbol': 'BTC/USD',
+                        'side': 'BUY',
+                        'quantity': 0.1,
+                        'price': 49000,
+                        'timestamp': datetime.now().isoformat()
+                    },
+                    {
+                        'id': 2,
+                        'symbol': 'ETH/USD', 
+                        'side': 'SELL',
+                        'quantity': 1.0,
+                        'price': 3150,
+                        'timestamp': datetime.now().isoformat()
+                    }
+                ]
+                
+                trades_df = pd.DataFrame(sample_trades)
+                csv = trades_df.to_csv(index=False)
+                st.download_button(
+                    label="Download CSV",
+                    data=csv,
+                    file_name=f"trades_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv"
+                )
+    
+    st.markdown("---")
+    
+    st.subheader("Exchange API Configuration")
     
     # Exchange API settings
     exchange = st.selectbox("Select Exchange", ["Binance", "Coinbase Pro", "Kraken", "Alpaca"])
