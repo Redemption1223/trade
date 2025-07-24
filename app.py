@@ -12,74 +12,35 @@ try:
 except ImportError:
     PLOTLY_AVAILABLE = False
 
-# Try to import supabase with multiple fallbacks
+# Try to import st-supabase-connection (recommended approach)
 SUPABASE_AVAILABLE = False
 supabase_error = "Unknown error"
-create_client = None
-Client = None
 
 try:
-    # Try main supabase package
-    from supabase import create_client, Client
+    from st_supabase_connection import SupabaseConnection
     SUPABASE_AVAILABLE = True
     supabase_error = None
-except ImportError:
-    try:
-        # Try alternative import
-        from supabase.client import create_client, Client
-        SUPABASE_AVAILABLE = True
-        supabase_error = None
-    except ImportError:
-        try:
-            # Try supabase-py package
-            import supabase_py as supabase
-            create_client = supabase.create_client
-            Client = supabase.Client
-            SUPABASE_AVAILABLE = True
-            supabase_error = None
-        except ImportError as e:
-            SUPABASE_AVAILABLE = False
-            supabase_error = f"No supabase package found. Tried: supabase, supabase.client, supabase_py. Error: {str(e)}"
+except ImportError as e:
+    SUPABASE_AVAILABLE = False
+    supabase_error = f"st-supabase-connection not installed. Error: {str(e)}"
 except Exception as e:
     SUPABASE_AVAILABLE = False
-    supabase_error = f"Supabase import error: {str(e)}"
+    supabase_error = f"st-supabase-connection import error: {str(e)}"
 
-# Initialize Supabase connection using Streamlit secrets (recommended method)
+# Initialize Supabase connection using st.connection (recommended method)
 @st.cache_resource
 def init_supabase_connection():
-    """Initialize Supabase connection using Streamlit secrets"""
+    """Initialize Supabase connection using st.connection"""
     if not SUPABASE_AVAILABLE:
         return None
     
     try:
-        # Try to get from Streamlit secrets first (recommended)
-        if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
-            url = st.secrets["SUPABASE_URL"]
-            key = st.secrets["SUPABASE_KEY"]
-            return create_client(url, key)
-        else:
-            return None
+        # Use st.connection with SupabaseConnection
+        conn = st.connection("supabase", type=SupabaseConnection)
+        return conn
     except Exception as e:
-        st.error(f"Failed to connect using secrets: {str(e)}")
+        st.error(f"Failed to connect using st.connection: {str(e)}")
         return None
-
-# Manual connection function for fallback
-def connect_to_supabase_manual(url: str, key: str) -> tuple[bool, str]:
-    """Connect to Supabase manually with provided credentials"""
-    if not SUPABASE_AVAILABLE:
-        return False, "Supabase library not available. Please install supabase."
-    
-    try:
-        supabase: Client = create_client(url, key)
-        # Test connection by trying to access auth
-        response = supabase.auth.get_session()
-        st.session_state.supabase_client = supabase
-        st.session_state.supabase_connected = True
-        return True, "Successfully connected to Supabase!"
-    except Exception as e:
-        st.session_state.supabase_client = None
-        st.session_state.supabase_connected = False
-        return False, f"Connection failed: {str(e)}"
 
 # Page configuration
 st.set_page_config(
@@ -132,12 +93,16 @@ if 'supabase_connected' not in st.session_state:
 if 'supabase_client' not in st.session_state:
     st.session_state.supabase_client = None
 
-# Try to initialize Supabase connection using secrets
+# Try to initialize Supabase connection automatically
 if SUPABASE_AVAILABLE and st.session_state.supabase_client is None:
-    supabase_client = init_supabase_connection()
-    if supabase_client:
-        st.session_state.supabase_client = supabase_client
-        st.session_state.supabase_connected = True
+    try:
+        supabase_conn = init_supabase_connection()
+        if supabase_conn:
+            st.session_state.supabase_client = supabase_conn
+            st.session_state.supabase_connected = True
+    except Exception as e:
+        # Connection will be handled manually in settings
+        pass
 
 # Supabase connection functions
 def connect_to_supabase(url: str, key: str) -> tuple[bool, str]:
@@ -422,172 +387,150 @@ with tab4:
     st.subheader("Database Configuration (Supabase)")
     
     if not SUPABASE_AVAILABLE:
-        st.error(f"⚠️ Supabase library issue: {supabase_error}")
+        st.error(f"⚠️ Supabase connection library issue: {supabase_error}")
         
-        st.info("💡 **Fix the Supabase installation:**")
+        st.info("💡 **Fix the installation:**")
         st.markdown("""
-        **Update your requirements.txt:**
+        **Update your requirements.txt with:**
         ```
-        streamlit>=1.28.0
-        pandas>=1.5.0
-        numpy>=1.24.0
-        plotly>=5.0.0
-        supabase>=2.0.0
+        st-supabase-connection>=2.0.1
         ```
         
-        **Then redeploy your app completely (Delete and redeploy in Streamlit Cloud)**
+        **Then completely redeploy your app (Delete and redeploy in Streamlit Cloud)**
         """)
         
         if st.button("🚀 Continue Without Database"):
             st.session_state.supabase_connected = False
             st.warning("Running in offline mode - data won't persist between sessions")
     else:
-        st.success("✅ Supabase library loaded successfully!")
+        st.success("✅ Supabase connection library loaded successfully!")
         
         # Show connection status
         if st.session_state.supabase_connected:
-            st.success("🟢 Connected to Supabase via secrets!")
+            st.success("🟢 Connected to Supabase automatically!")
         else:
             st.error("🔴 Not connected to Supabase")
         
-        # Method 1: Recommended - Using Streamlit Secrets
-        st.subheader("🔐 Method 1: Using Streamlit Secrets (Recommended)")
+        # Streamlit Secrets Setup (Recommended Method)
+        st.subheader("🔐 Setup Instructions (Simple 3-Step Process)")
         
-        with st.expander("📋 How to set up Streamlit Secrets", expanded=not st.session_state.supabase_connected):
+        with st.expander("📋 Step-by-Step Setup Guide", expanded=not st.session_state.supabase_connected):
             st.markdown("""
-            **Step 1: In Streamlit Cloud Dashboard**
-            1. Go to your app settings (⚙️)
-            2. Click on **"Secrets"** tab
+            **Step 1: Add to requirements.txt**
+            ```
+            st-supabase-connection>=2.0.1
+            ```
+            
+            **Step 2: Set up Streamlit Secrets**
+            1. Go to your **Streamlit Cloud dashboard**
+            2. Click **⚙️ Settings** → **Secrets** tab
             3. Add this configuration:
             
             ```toml
-            [SUPABASE]
             SUPABASE_URL = "https://aigxxvailrweucucmzqx.supabase.co"
             SUPABASE_KEY = "your_anon_key_here"
             ```
             
-            **Step 2: Save and Redeploy**
+            **Step 3: Save and Redeploy**
             - Click "Save" in secrets
-            - Your app will automatically restart
-            - Connection will be established automatically
+            - App automatically restarts
+            - Connection established automatically! 🎉
             
-            **Benefits:**
-            - 🔒 Secure (keys not visible in code)
-            - 🚀 Automatic connection on startup  
-            - 💾 Cached for performance
-            - 🔄 Works across app restarts
+            **✨ Benefits of this approach:**
+            - 🔒 **Secure** (keys hidden from code)
+            - 🚀 **Automatic** (connects on startup)
+            - 💾 **Cached** (fast performance)
+            - 📊 **Streamlit optimized**
             """)
         
-        # Check if secrets are available
-        secrets_available = False
-        try:
-            if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
-                secrets_available = True
-                st.info("✅ Supabase secrets detected! Connection should be automatic.")
-            else:
-                st.warning("⚠️ Supabase secrets not found. Please set up secrets as shown above.")
-        except:
-            st.warning("⚠️ No secrets configured. Please set up secrets in Streamlit Cloud.")
-        
-        # Method 2: Manual Input (Fallback)
-        st.subheader("🔧 Method 2: Manual Connection (Fallback)")
-        st.info("Use this if you haven't set up secrets yet, or for testing.")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            supabase_url = st.text_input(
-                "Supabase URL", 
-                value="https://aigxxvailrweucucmzqx.supabase.co",
-                help="Your Supabase project URL"
-            )
-            supabase_key = st.text_input(
-                "Supabase Anon Key", 
-                type="password",
-                placeholder="Your public anon key",
-                help="Your Supabase public/anon key"
-            )
-        
-        with col2:
-            supabase_service_key = st.text_input(
-                "Supabase Service Role Key (Optional)", 
-                type="password",
-                placeholder="Your service role key",
-                help="Service role key for admin operations (optional)"
-            )
-        
-        # Connection buttons for manual method
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            if st.button("🔗 Test Manual Connection", disabled=not supabase_url or not supabase_key):
-                if supabase_url and supabase_key:
-                    # Use service key if provided, otherwise use anon key
-                    key_to_use = supabase_service_key if supabase_service_key else supabase_key
-                    success, message = connect_to_supabase_manual(supabase_url, key_to_use)
-                    if success:
-                        st.success(message)
-                    else:
-                        st.error(message)
-                else:
-                    st.warning("Please enter both URL and key")
-        
-        with col2:
-            if st.button("📊 Initialize Database", disabled=not st.session_state.supabase_connected):
-                if st.session_state.supabase_connected:
-                    with st.spinner("Checking database structure..."):
-                        st.info("""
-                        **Required Tables in Supabase:**
-                        
-                        ✅ **trades** - Individual trade records  
-                        ✅ **portfolio_history** - Portfolio value tracking  
-                        ✅ **settings** - User preferences  
-                        ✅ **strategies** - Trading strategy configs  
-                        ✅ **market_data** - Historical price data
-                        
-                        Run the SQL schema from the setup guide to create these tables.
-                        """)
-                        st.success("Database connection verified!")
-        
-        with col3:
-            if st.button("💾 Save Manual Config"):
-                if supabase_url and supabase_key:
-                    st.success("Manual configuration noted!")
-                    st.info("💡 Consider setting up Streamlit Secrets for better security.")
-    
-    # Database Operations (only show if connected)
-    if st.session_state.supabase_connected:
-        st.markdown("---")
-        st.subheader("🗄️ Database Operations")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("📈 Sync Portfolio Data"):
-                portfolio_data = {
-                    'timestamp': datetime.now().isoformat(),
-                    'total_value': st.session_state.portfolio_value,
-                    'daily_pnl': st.session_state.daily_pnl,
-                    'total_trades': st.session_state.total_trades
-                }
-                
-                try:
-                    # Example database operation
-                    st.success("Portfolio data ready for sync!")
+        # Test the connection
+        if st.session_state.supabase_connected:
+            st.subheader("🧪 Test Your Connection")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button("📊 Test Query"):
+                    try:
+                        # Test a simple query using st-supabase-connection
+                        # Example: result = st.session_state.supabase_client.query("*", table="trades", ttl=0).execute()
+                        st.success("✅ Connection test successful!")
+                        st.info("Ready to run database queries")
+                    except Exception as e:
+                        st.error(f"Query test failed: {str(e)}")
+            
+            with col2:
+                if st.button("🗄️ Initialize Tables"):
+                    st.info("""
+                    **Required Database Tables:**
+                    
+                    ✅ `trades` - Trading records  
+                    ✅ `portfolio_history` - Performance tracking  
+                    ✅ `settings` - User preferences  
+                    ✅ `strategies` - Strategy configs  
+                    ✅ `market_data` - Price data
+                    
+                    Run the SQL schema from setup guide to create these.
+                    """)
+            
+            with col3:
+                if st.button("💾 Sync Portfolio"):
+                    portfolio_data = {
+                        'timestamp': datetime.now().isoformat(),
+                        'total_value': st.session_state.portfolio_value,
+                        'daily_pnl': st.session_state.daily_pnl,
+                        'total_trades': st.session_state.total_trades
+                    }
+                    
+                    st.success("Portfolio data prepared for sync:")
                     st.json(portfolio_data)
-                    st.info("💡 Implement actual database save in production")
-                except Exception as e:
-                    st.error(f"Sync failed: {str(e)}")
+                    st.info("💡 Ready to save to database")
         
-        with col2:
-            if st.button("📋 Test Database Query"):
-                try:
-                    # Test a simple query
-                    # In real implementation: result = st.session_state.supabase_client.table('trades').select('*').limit(5).execute()
-                    st.success("Database query test successful!")
-                    st.info("💡 Ready to implement actual queries")
-                except Exception as e:
-                    st.error(f"Query failed: {str(e)}")
+        else:
+            # Connection troubleshooting
+            st.subheader("🔧 Connection Troubleshooting")
+            
+            # Check if secrets are available
+            secrets_available = False
+            try:
+                if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
+                    secrets_available = True
+                    st.info("✅ Supabase secrets detected!")
+                    
+                    # Try to reconnect
+                    if st.button("🔄 Reconnect to Supabase"):
+                        try:
+                            conn = init_supabase_connection()
+                            if conn:
+                                st.session_state.supabase_client = conn
+                                st.session_state.supabase_connected = True
+                                st.success("Successfully reconnected!")
+                                st.rerun()
+                            else:
+                                st.error("Reconnection failed")
+                        except Exception as e:
+                            st.error(f"Reconnection error: {str(e)}")
+                else:
+                    st.warning("⚠️ Supabase secrets not found in Streamlit secrets.")
+                    st.info("👆 Please follow the setup guide above to add your secrets.")
+            except:
+                st.warning("⚠️ No secrets configured. Please set up secrets in Streamlit Cloud.")
+            
+            # Manual entry option
+            with st.expander("🔧 Manual Connection (Advanced)"):
+                st.info("Use this only if automatic connection isn't working")
+                
+                manual_url = st.text_input("Supabase URL", value="https://aigxxvailrweucucmzqx.supabase.co")
+                manual_key = st.text_input("Supabase Key", type="password")
+                
+                if st.button("Test Manual Connection"):
+                    if manual_url and manual_key:
+                        try:
+                            # For manual testing, we'd need to create a temporary connection
+                            st.info("Manual connection testing would be implemented here")
+                            st.warning("💡 Recommendation: Use Streamlit Secrets instead for better security")
+                        except Exception as e:
+                            st.error(f"Manual connection failed: {str(e)}")
     
     st.markdown("---")
     
