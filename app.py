@@ -1,10 +1,16 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
 from datetime import datetime, timedelta
 import time
+
+# Try to import plotly, fallback to basic charts if not available
+try:
+    import plotly.graph_objects as go
+    import plotly.express as px
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
 
 # Page configuration
 st.set_page_config(
@@ -140,23 +146,29 @@ with tab1:
     
     df = pd.DataFrame(price_data)
     
-    # Create candlestick chart
-    fig = go.Figure(data=go.Scatter(
-        x=df['timestamp'],
-        y=df['price'],
-        mode='lines',
-        name='Price',
-        line=dict(color='#1f77b4', width=2)
-    ))
-    
-    fig.update_layout(
-        title="Price Chart",
-        xaxis_title="Time",
-        yaxis_title="Price ($)",
-        height=400
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
+    # Create price chart
+    if PLOTLY_AVAILABLE:
+        fig = go.Figure(data=go.Scatter(
+            x=df['timestamp'],
+            y=df['price'],
+            mode='lines',
+            name='Price',
+            line=dict(color='#1f77b4', width=2)
+        ))
+        
+        fig.update_layout(
+            title="Price Chart",
+            xaxis_title="Time",
+            yaxis_title="Price ($)",
+            height=400
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        # Fallback to Streamlit's built-in line chart
+        st.subheader("Price Chart")
+        chart_df = df.set_index('timestamp')[['price']]
+        st.line_chart(chart_df)
     
     # Real-time price ticker
     if st.session_state.trading_active:
@@ -204,22 +216,36 @@ with tab3:
         portfolio_dates = pd.date_range(start=datetime.now() - timedelta(days=30), end=datetime.now(), freq='D')
         portfolio_values = np.cumsum(np.random.randn(len(portfolio_dates)) * 100) + 10000
         
-        fig_portfolio = px.line(
-            x=portfolio_dates,
-            y=portfolio_values,
-            title="Portfolio Value Over Time"
-        )
-        st.plotly_chart(fig_portfolio, use_container_width=True)
+        if PLOTLY_AVAILABLE:
+            fig_portfolio = px.line(
+                x=portfolio_dates,
+                y=portfolio_values,
+                title="Portfolio Value Over Time"
+            )
+            st.plotly_chart(fig_portfolio, use_container_width=True)
+        else:
+            st.subheader("Portfolio Value Over Time")
+            portfolio_df = pd.DataFrame({
+                'date': portfolio_dates,
+                'value': portfolio_values
+            }).set_index('date')
+            st.line_chart(portfolio_df)
     
     with col2:
-        # Win/Loss ratio pie chart
-        win_loss_data = {'Outcome': ['Wins', 'Losses'], 'Count': [65, 35]}
-        fig_pie = px.pie(
-            values=win_loss_data['Count'],
-            names=win_loss_data['Outcome'],
-            title="Win/Loss Ratio"
-        )
-        st.plotly_chart(fig_pie, use_container_width=True)
+        # Win/Loss ratio
+        if PLOTLY_AVAILABLE:
+            win_loss_data = {'Outcome': ['Wins', 'Losses'], 'Count': [65, 35]}
+            fig_pie = px.pie(
+                values=win_loss_data['Count'],
+                names=win_loss_data['Outcome'],
+                title="Win/Loss Ratio"
+            )
+            st.plotly_chart(fig_pie, use_container_width=True)
+        else:
+            st.subheader("Win/Loss Ratio")
+            st.write("Wins: 65 trades")
+            st.write("Losses: 35 trades")
+            st.progress(0.65)  # 65% win rate
     
     # Performance metrics
     st.subheader("Key Metrics")
