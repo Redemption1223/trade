@@ -3,3 +3,5 @@ pandas>=1.5.0
 numpy>=1.24.0
 plotly>=5.0.0
 requests>=2.25.0
+MetaTrader5>=5.0.45
+pytz>=2021.3
