@@ -12,35 +12,99 @@ try:
 except ImportError:
     PLOTLY_AVAILABLE = False
 
-# Try to import st-supabase-connection (recommended approach)
-SUPABASE_AVAILABLE = False
-supabase_error = "Unknown error"
+# Import requests for direct HTTP API calls (no supabase packages needed!)
+import requests
+import json
 
-try:
-    from st_supabase_connection import SupabaseConnection
-    SUPABASE_AVAILABLE = True
-    supabase_error = None
-except ImportError as e:
-    SUPABASE_AVAILABLE = False
-    supabase_error = f"st-supabase-connection not installed. Error: {str(e)}"
-except Exception as e:
-    SUPABASE_AVAILABLE = False
-    supabase_error = f"st-supabase-connection import error: {str(e)}"
-
-# Initialize Supabase connection using st.connection (recommended method)
-@st.cache_resource
-def init_supabase_connection():
-    """Initialize Supabase connection using st.connection"""
-    if not SUPABASE_AVAILABLE:
-        return None
+# Supabase connection using direct HTTP requests - NO PACKAGES NEEDED!
+class SupabaseHTTPClient:
+    def __init__(self, url: str, key: str):
+        self.url = url.rstrip('/')
+        self.key = key
+        self.headers = {
+            'apikey': self.key,
+            'Authorization': f'Bearer {self.key}',
+            'Content-Type': 'application/json',
+            'Prefer': 'return=representation'
+        }
+        self.rest_url = f"{self.url}/rest/v1"
     
+    def test_connection(self) -> tuple[bool, str]:
+        """Test the connection to Supabase"""
+        try:
+            response = requests.get(f"{self.rest_url}/", headers=self.headers, timeout=10)
+            if response.status_code == 200:
+                return True, "✅ Connection successful!"
+            else:
+                return False, f"❌ Connection failed: HTTP {response.status_code}"
+        except requests.exceptions.RequestException as e:
+            return False, f"❌ Connection error: {str(e)}"
+    
+    def insert_data(self, table: str, data: dict) -> tuple[bool, str]:
+        """Insert data into a table"""
+        try:
+            response = requests.post(
+                f"{self.rest_url}/{table}",
+                headers=self.headers,
+                json=data,
+                timeout=10
+            )
+            if response.status_code in [200, 201]:
+                return True, "✅ Data inserted successfully!"
+            else:
+                return False, f"❌ Insert failed: {response.text}"
+        except requests.exceptions.RequestException as e:
+            return False, f"❌ Insert error: {str(e)}"
+    
+    def select_data(self, table: str, limit: int = 100) -> tuple[bool, list]:
+        """Select data from a table"""
+        try:
+            response = requests.get(
+                f"{self.rest_url}/{table}?limit={limit}",
+                headers=self.headers,
+                timeout=10
+            )
+            if response.status_code == 200:
+                return True, response.json()
+            else:
+                return False, []
+        except requests.exceptions.RequestException as e:
+            return False, []
+
+# Initialize with HTTP client instead of packages
+SUPABASE_AVAILABLE = True  # Always available since we use HTTP requests!
+supabase_error = None
+
+# Initialize connection using direct HTTP
+@st.cache_resource
+def init_supabase_http_connection():
+    """Initialize Supabase connection using direct HTTP requests"""
     try:
-        # Use st.connection with SupabaseConnection
-        conn = st.connection("supabase", type=SupabaseConnection)
-        return conn
+        # Try to get from Streamlit secrets
+        if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
+            url = st.secrets["SUPABASE_URL"]
+            key = st.secrets["SUPABASE_KEY"]
+            return SupabaseHTTPClient(url, key)
+        else:
+            return None
     except Exception as e:
-        st.error(f"Failed to connect using st.connection: {str(e)}")
+        st.error(f"Failed to initialize HTTP connection: {str(e)}")
         return None
+
+# Manual connection function
+def connect_to_supabase_http(url: str, key: str) -> tuple[bool, str]:
+    """Connect to Supabase using HTTP requests"""
+    try:
+        client = SupabaseHTTPClient(url, key)
+        success, message = client.test_connection()
+        if success:
+            st.session_state.supabase_client = client
+            st.session_state.supabase_connected = True
+        return success, message
+    except Exception as e:
+        st.session_state.supabase_client = None
+        st.session_state.supabase_connected = False
+        return False, f"Connection failed: {str(e)}"
 
 # Page configuration
 st.set_page_config(
@@ -93,13 +157,16 @@ if 'supabase_connected' not in st.session_state:
 if 'supabase_client' not in st.session_state:
     st.session_state.supabase_client = None
 
-# Try to initialize Supabase connection automatically
-if SUPABASE_AVAILABLE and st.session_state.supabase_client is None:
+# Try to initialize Supabase connection automatically using HTTP
+if st.session_state.supabase_client is None:
     try:
-        supabase_conn = init_supabase_connection()
-        if supabase_conn:
-            st.session_state.supabase_client = supabase_conn
-            st.session_state.supabase_connected = True
+        http_client = init_supabase_http_connection()
+        if http_client:
+            # Test the connection
+            success, message = http_client.test_connection()
+            if success:
+                st.session_state.supabase_client = http_client
+                st.session_state.supabase_connected = True
     except Exception as e:
         # Connection will be handled manually in settings
         pass
@@ -293,36 +360,57 @@ with tab2:
     styled_df = positions_df.style.applymap(color_pnl, subset=['PnL', 'PnL %'])
     st.dataframe(styled_df, use_container_width=True)
     
-    # Database integration for positions
+    # Database integration for positions using HTTP
     if st.session_state.supabase_connected:
         col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("💾 Save Positions to DB"):
-                # Convert positions to database format
+                saved_count = 0
                 for _, row in positions_df.iterrows():
                     trade_data = {
                         'symbol': row['Symbol'],
                         'side': row['Side'].lower(),
-                        'size': row['Size'],
-                        'entry_price': row['Entry Price'],
-                        'current_price': row['Current Price'],
-                        'pnl': row['PnL'],
-                        'pnl_percent': row['PnL %'],
+                        'size': float(row['Size']),
+                        'entry_price': float(row['Entry Price']),
+                        'current_price': float(row['Current Price']),
+                        'pnl': float(row['PnL']),
+                        'pnl_percent': float(row['PnL %']),
                         'timestamp': datetime.now().isoformat(),
                         'status': 'open'
                     }
-                    # In real implementation: save_trade_to_supabase(trade_data)
+                    
+                    success, message = st.session_state.supabase_client.insert_data('trades', trade_data)
+                    if success:
+                        saved_count += 1
                 
-                st.success(f"Saved {len(positions_df)} positions to database!")
+                if saved_count > 0:
+                    st.success(f"Saved {saved_count} positions to database!")
+                else:
+                    st.warning("No positions were saved. Check if trades table exists.")
         
         with col2:
             if st.button("🔄 Load from DB"):
-                st.info("Loading positions from Supabase...")
-                # In real implementation: load positions from database
+                success, data = st.session_state.supabase_client.select_data('trades', limit=20)
+                if success and data:
+                    st.success(f"Found {len(data)} trades in database:")
+                    df = pd.DataFrame(data)
+                    st.dataframe(df[['symbol', 'side', 'size', 'pnl', 'timestamp']].head())
+                else:
+                    st.info("No trades found in database")
                 
         with col3:
             if st.button("📊 Position Analytics"):
-                st.info("Generating position analytics from database...")
+                success, data = st.session_state.supabase_client.select_data('trades', limit=100)
+                if success and data:
+                    df = pd.DataFrame(data)
+                    total_pnl = sum([float(x) for x in df['pnl'] if x is not None])
+                    win_count = len([x for x in df['pnl'] if x is not None and float(x) > 0])
+                    total_trades = len(df)
+                    
+                    st.metric("Total P&L", f"${total_pnl:.2f}")
+                    st.metric("Win Rate", f"{win_count/total_trades*100:.1f}%" if total_trades > 0 else "0%")
+                else:
+                    st.info("No data for analytics")
     else:
         st.info("💡 Connect to Supabase in Settings to save/load positions from database")
 
@@ -386,151 +474,184 @@ with tab3:
 with tab4:
     st.subheader("Database Configuration (Supabase)")
     
-    if not SUPABASE_AVAILABLE:
-        st.error(f"⚠️ Supabase connection library issue: {supabase_error}")
-        
-        st.info("💡 **Fix the installation:**")
-        st.markdown("""
-        **Update your requirements.txt with:**
-        ```
-        st-supabase-connection>=2.0.1
-        ```
-        
-        **Then completely redeploy your app (Delete and redeploy in Streamlit Cloud)**
-        """)
-        
-        if st.button("🚀 Continue Without Database"):
-            st.session_state.supabase_connected = False
-            st.warning("Running in offline mode - data won't persist between sessions")
+    st.success("✅ Supabase HTTP client ready! (No packages needed)")
+    
+    # Show connection status
+    if st.session_state.supabase_connected:
+        st.success("🟢 Connected to Supabase via HTTP API!")
     else:
-        st.success("✅ Supabase connection library loaded successfully!")
+        st.error("🔴 Not connected to Supabase")
+    
+    # Setup Instructions
+    st.subheader("🚀 HTTP API Setup (Bulletproof Method)")
+    
+    with st.expander("📋 Simple 2-Step Setup", expanded=not st.session_state.supabase_connected):
+        st.markdown("""
+        **This method uses direct HTTP requests - NO PACKAGES TO INSTALL!**
         
-        # Show connection status
-        if st.session_state.supabase_connected:
-            st.success("🟢 Connected to Supabase automatically!")
-        else:
-            st.error("🔴 Not connected to Supabase")
+        **Step 1: Set up Streamlit Secrets**
+        1. Go to **Streamlit Cloud dashboard** → **⚙️ Settings** → **Secrets**
+        2. Add this configuration:
         
-        # Streamlit Secrets Setup (Recommended Method)
-        st.subheader("🔐 Setup Instructions (Simple 3-Step Process)")
+        ```toml
+        SUPABASE_URL = "https://aigxxvailrweucucmzqx.supabase.co"
+        SUPABASE_KEY = "your_anon_key_here"
+        ```
         
-        with st.expander("📋 Step-by-Step Setup Guide", expanded=not st.session_state.supabase_connected):
-            st.markdown("""
-            **Step 1: Add to requirements.txt**
-            ```
-            st-supabase-connection>=2.0.1
-            ```
-            
-            **Step 2: Set up Streamlit Secrets**
-            1. Go to your **Streamlit Cloud dashboard**
-            2. Click **⚙️ Settings** → **Secrets** tab
-            3. Add this configuration:
-            
-            ```toml
-            SUPABASE_URL = "https://aigxxvailrweucucmzqx.supabase.co"
-            SUPABASE_KEY = "your_anon_key_here"
-            ```
-            
-            **Step 3: Save and Redeploy**
-            - Click "Save" in secrets
-            - App automatically restarts
-            - Connection established automatically! 🎉
-            
-            **✨ Benefits of this approach:**
-            - 🔒 **Secure** (keys hidden from code)
-            - 🚀 **Automatic** (connects on startup)
-            - 💾 **Cached** (fast performance)
-            - 📊 **Streamlit optimized**
-            """)
+        **Step 2: Deploy**
+        - Save secrets and redeploy
+        - Connection established automatically! 
         
-        # Test the connection
-        if st.session_state.supabase_connected:
-            st.subheader("🧪 Test Your Connection")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                if st.button("📊 Test Query"):
-                    try:
-                        # Test a simple query using st-supabase-connection
-                        # Example: result = st.session_state.supabase_client.query("*", table="trades", ttl=0).execute()
-                        st.success("✅ Connection test successful!")
-                        st.info("Ready to run database queries")
-                    except Exception as e:
-                        st.error(f"Query test failed: {str(e)}")
-            
-            with col2:
-                if st.button("🗄️ Initialize Tables"):
-                    st.info("""
-                    **Required Database Tables:**
-                    
-                    ✅ `trades` - Trading records  
-                    ✅ `portfolio_history` - Performance tracking  
-                    ✅ `settings` - User preferences  
-                    ✅ `strategies` - Strategy configs  
-                    ✅ `market_data` - Price data
-                    
-                    Run the SQL schema from setup guide to create these.
-                    """)
-            
-            with col3:
-                if st.button("💾 Sync Portfolio"):
-                    portfolio_data = {
-                        'timestamp': datetime.now().isoformat(),
-                        'total_value': st.session_state.portfolio_value,
-                        'daily_pnl': st.session_state.daily_pnl,
-                        'total_trades': st.session_state.total_trades
-                    }
-                    
-                    st.success("Portfolio data prepared for sync:")
+        **✨ Why this works:**
+        - 🚀 **No package installation issues**
+        - 📡 **Direct REST API calls**
+        - ⚡ **Always reliable**
+        - 🔒 **Same security as packages**
+        """)
+    
+    # Connection testing section
+    if st.session_state.supabase_connected:
+        st.subheader("🧪 Test Your HTTP Connection")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("🔗 Test Connection"):
+                success, message = st.session_state.supabase_client.test_connection()
+                if success:
+                    st.success(message)
+                else:
+                    st.error(message)
+        
+        with col2:
+            if st.button("📊 Test Insert"):
+                test_data = {
+                    'test_field': 'Hello from AutoTrader Pro!',
+                    'timestamp': datetime.now().isoformat(),
+                    'value': 12345
+                }
+                
+                # Try to insert test data (this will fail if table doesn't exist, which is expected)
+                success, message = st.session_state.supabase_client.insert_data('test_table', test_data)
+                if success:
+                    st.success("✅ Database insert test successful!")
+                else:
+                    st.info("💡 Create tables first (expected if tables don't exist yet)")
+                    st.code(message)
+        
+        with col3:
+            if st.button("📈 Save Portfolio"):
+                portfolio_data = {
+                    'timestamp': datetime.now().isoformat(),
+                    'total_value': st.session_state.portfolio_value,
+                    'daily_pnl': st.session_state.daily_pnl,
+                    'total_trades': st.session_state.total_trades
+                }
+                
+                success, message = st.session_state.supabase_client.insert_data('portfolio_history', portfolio_data)
+                if success:
+                    st.success("Portfolio saved to database!")
+                else:
+                    st.info("Create portfolio_history table first")
+                
+                with st.expander("📊 Portfolio Data"):
                     st.json(portfolio_data)
-                    st.info("💡 Ready to save to database")
+    
+    else:
+        # Connection troubleshooting
+        st.subheader("🔧 Connect to Supabase")
         
-        else:
-            # Connection troubleshooting
-            st.subheader("🔧 Connection Troubleshooting")
-            
-            # Check if secrets are available
-            secrets_available = False
-            try:
-                if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
-                    secrets_available = True
-                    st.info("✅ Supabase secrets detected!")
-                    
-                    # Try to reconnect
-                    if st.button("🔄 Reconnect to Supabase"):
-                        try:
-                            conn = init_supabase_connection()
-                            if conn:
-                                st.session_state.supabase_client = conn
+        # Check if secrets are available
+        try:
+            if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
+                st.info("✅ Supabase secrets detected!")
+                
+                if st.button("🔄 Connect Now"):
+                    try:
+                        http_client = init_supabase_http_connection()
+                        if http_client:
+                            success, message = http_client.test_connection()
+                            if success:
+                                st.session_state.supabase_client = http_client
                                 st.session_state.supabase_connected = True
-                                st.success("Successfully reconnected!")
+                                st.success(message)
                                 st.rerun()
                             else:
-                                st.error("Reconnection failed")
-                        except Exception as e:
-                            st.error(f"Reconnection error: {str(e)}")
-                else:
-                    st.warning("⚠️ Supabase secrets not found in Streamlit secrets.")
-                    st.info("👆 Please follow the setup guide above to add your secrets.")
-            except:
-                st.warning("⚠️ No secrets configured. Please set up secrets in Streamlit Cloud.")
+                                st.error(message)
+                        else:
+                            st.error("Failed to initialize client")
+                    except Exception as e:
+                        st.error(f"Connection error: {str(e)}")
+            else:
+                st.warning("⚠️ Supabase secrets not found.")
+                st.info("👆 Please follow the 2-step setup guide above.")
+        except:
+            st.warning("⚠️ No secrets configured. Please set up secrets in Streamlit Cloud.")
+        
+        # Manual connection option
+        with st.expander("🔧 Manual Connection (Testing)"):
+            st.info("Test your connection before setting up secrets")
             
-            # Manual entry option
-            with st.expander("🔧 Manual Connection (Advanced)"):
-                st.info("Use this only if automatic connection isn't working")
-                
+            col1, col2 = st.columns(2)
+            with col1:
                 manual_url = st.text_input("Supabase URL", value="https://aigxxvailrweucucmzqx.supabase.co")
+            with col2:
                 manual_key = st.text_input("Supabase Key", type="password")
-                
-                if st.button("Test Manual Connection"):
-                    if manual_url and manual_key:
-                        try:
-                            # For manual testing, we'd need to create a temporary connection
-                            st.info("Manual connection testing would be implemented here")
-                            st.warning("💡 Recommendation: Use Streamlit Secrets instead for better security")
-                        except Exception as e:
-                            st.error(f"Manual connection failed: {str(e)}")
+            
+            if st.button("🧪 Test Manual Connection"):
+                if manual_url and manual_key:
+                    success, message = connect_to_supabase_http(manual_url, manual_key)
+                    if success:
+                        st.success(message)
+                        st.info("✅ Connection works! Now set up secrets for automatic connection.")
+                    else:
+                        st.error(message)
+                else:
+                    st.warning("Please enter both URL and key")
+    
+    # Database operations section
+    if st.session_state.supabase_connected:
+        st.markdown("---")
+        st.subheader("🗄️ Database Operations")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("📋 Create Tables SQL"):
+                st.info("Run this SQL in your Supabase dashboard:")
+                st.code("""
+-- Create trades table
+CREATE TABLE trades (
+    id SERIAL PRIMARY KEY,
+    symbol VARCHAR(50),
+    side VARCHAR(10),
+    size DECIMAL(18,8),
+    entry_price DECIMAL(18,8),
+    pnl DECIMAL(18,8),
+    timestamp TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Create portfolio_history table  
+CREATE TABLE portfolio_history (
+    id SERIAL PRIMARY KEY,
+    total_value DECIMAL(18,8),
+    daily_pnl DECIMAL(18,8),
+    total_trades INTEGER,
+    timestamp TIMESTAMPTZ DEFAULT NOW()
+);
+                """, language="sql")
+        
+        with col2:
+            if st.button("📊 View Data"):
+                success, data = st.session_state.supabase_client.select_data('portfolio_history', limit=10)
+                if success and data:
+                    st.success(f"Found {len(data)} records:")
+                    df = pd.DataFrame(data)
+                    st.dataframe(df)
+                elif success:
+                    st.info("No data found (table might be empty)")
+                else:
+                    st.warning("Could not retrieve data (create tables first)")
     
     st.markdown("---")
     
