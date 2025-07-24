@@ -12,14 +12,34 @@ try:
 except ImportError:
     PLOTLY_AVAILABLE = False
 
-# Try to import supabase
+# Try to import supabase with multiple fallbacks
+SUPABASE_AVAILABLE = False
+supabase_error = "Unknown error"
+create_client = None
+Client = None
+
 try:
+    # Try main supabase package
     from supabase import create_client, Client
     SUPABASE_AVAILABLE = True
     supabase_error = None
-except ImportError as e:
-    SUPABASE_AVAILABLE = False
-    supabase_error = str(e)
+except ImportError:
+    try:
+        # Try alternative import
+        from supabase.client import create_client, Client
+        SUPABASE_AVAILABLE = True
+        supabase_error = None
+    except ImportError:
+        try:
+            # Try supabase-py package
+            import supabase_py as supabase
+            create_client = supabase.create_client
+            Client = supabase.Client
+            SUPABASE_AVAILABLE = True
+            supabase_error = None
+        except ImportError as e:
+            SUPABASE_AVAILABLE = False
+            supabase_error = f"No supabase package found. Tried: supabase, supabase.client, supabase_py. Error: {str(e)}"
 except Exception as e:
     SUPABASE_AVAILABLE = False
     supabase_error = f"Supabase import error: {str(e)}"
@@ -359,12 +379,26 @@ with tab4:
     
     if not SUPABASE_AVAILABLE:
         st.error(f"⚠️ Supabase library issue: {supabase_error}")
-        st.info("💡 **Troubleshooting Steps:**")
+        
+        st.info("💡 **Try these solutions:**")
         st.markdown("""
-        1. **Redeploy your app** after updating requirements.txt
-        2. **Check requirements.txt** contains: `supabase>=2.3.0`
-        3. **Wait 2-3 minutes** for dependencies to install
-        4. **Try rebooting** your Streamlit app if using Streamlit Cloud
+        **Solution 1: Update requirements.txt with exact version**
+        ```
+        supabase==2.7.4
+        httpx>=0.24.0
+        python-dotenv>=1.0.0
+        ```
+        
+        **Solution 2: Alternative package name**
+        ```
+        supabase-py==2.7.4
+        ```
+        
+        **Solution 3: Manual installation**
+        If using local development:
+        ```bash
+        pip install supabase==2.7.4
+        ```
         """)
         
         # Show debug info
@@ -374,12 +408,25 @@ with tab4:
             available_packages = [module for module in sys.modules.keys() if not module.startswith('_')]
             st.write(f"Total packages loaded: {len(available_packages)}")
             
-            # Check if any supabase-related packages are available
-            supabase_packages = [pkg for pkg in available_packages if 'supabase' in pkg.lower()]
-            if supabase_packages:
-                st.write(f"Supabase-related packages found: {supabase_packages}")
-            else:
-                st.write("No supabase packages detected")
+            # Check for related packages
+            related_packages = [pkg for pkg in available_packages if any(x in pkg.lower() for x in ['http', 'request', 'client', 'supa'])]
+            if related_packages:
+                st.write(f"Related packages found: {related_packages[:10]}")  # Show first 10
+            
+            # Check if we can import httpx (required dependency)
+            try:
+                import httpx
+                st.success("✅ httpx is available")
+            except ImportError:
+                st.error("❌ httpx not available (required for supabase)")
+        
+        # Provide manual connection option
+        st.subheader("🔧 Manual Database Connection")
+        st.info("As a temporary workaround, you can use the app without Supabase. Data will be stored in session only.")
+        
+        if st.button("🚀 Continue Without Database"):
+            st.session_state.supabase_connected = False
+            st.warning("Running in offline mode - data won't persist between sessions")
     else:
         st.success("✅ Supabase library loaded successfully!")
     
