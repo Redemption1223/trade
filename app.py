@@ -103,15 +103,28 @@ def connect_to_supabase(url: str, key: str) -> tuple[bool, str]:
     
     try:
         supabase: Client = create_client(url, key)
-        # Test connection by trying to access auth
-        response = supabase.auth.get_session()
+        
+        # Simple connection test - try to access a table
+        response = supabase.table('settings').select('*').limit(1).execute()
+        
         st.session_state.supabase_client = supabase
         st.session_state.supabase_connected = True
-        return True, "Successfully connected to Supabase!"
+        return True, f"Successfully connected to Supabase! Found {len(response.data)} settings records."
+        
     except Exception as e:
         st.session_state.supabase_client = None
         st.session_state.supabase_connected = False
-        return False, f"Connection failed: {str(e)}"
+        error_msg = str(e)
+        
+        # Provide specific help for common errors
+        if "403" in error_msg or "Forbidden" in error_msg:
+            return False, f"🚫 Permission denied. This usually means:\n1. Your API key doesn't have the right permissions\n2. Row Level Security is blocking access\n3. Tables don't exist yet\n\nTry running the simplified SQL schema first!"
+        elif "404" in error_msg or "Not Found" in error_msg:
+            return False, f"❌ Table not found. Please run the SQL schema in your Supabase dashboard first."
+        elif "401" in error_msg or "Unauthorized" in error_msg:
+            return False, f"🔑 Invalid API key. Check your anon key is correct."
+        else:
+            return False, f"Connection failed: {error_msg}"
 
 def save_trade_to_supabase(trade_data: dict) -> bool:
     """Save trade data to Supabase"""
@@ -206,23 +219,31 @@ tab1, tab2, tab3, tab4 = st.tabs(["📊 Live Charts", "📋 Positions", "📈 Pe
 with tab1:
     st.subheader("Live Market Data")
     
-    # Generate sample data for demonstration
-    dates = pd.date_range(start=datetime.now() - timedelta(days=30), end=datetime.now(), freq='H')
+    # Generate safe sample data for demonstration
+    dates = pd.date_range(start=datetime.now() - timedelta(days=7), end=datetime.now(), freq='H')
     np.random.seed(42)
     
-    # Sample price data
+    # Sample price data with controlled randomness
     price_data = []
     base_price = 50000 if "BTC" in str(selected_pairs) else 3000
+    current_price = base_price
     
     for i, date in enumerate(dates):
-        price = base_price + np.cumsum(np.random.randn(1) * 100)[0]
+        # Small random walk instead of cumulative sum
+        change = np.random.normal(0, base_price * 0.02)  # 2% volatility
+        current_price = max(current_price + change, base_price * 0.5)  # Don't go below 50% of base
+        current_price = min(current_price, base_price * 2.0)  # Don't go above 200% of base
+        
         price_data.append({
             'timestamp': date,
-            'price': max(price, base_price * 0.8),  # Prevent negative prices
+            'price': round(current_price, 2),
             'volume': np.random.randint(100, 1000)
         })
     
     df = pd.DataFrame(price_data)
+    
+    # Ensure no infinite or NaN values
+    df = df.replace([np.inf, -np.inf], np.nan).dropna()
     
     # Create price chart
     if PLOTLY_AVAILABLE:
@@ -323,15 +344,29 @@ with tab3:
     col1, col2 = st.columns(2)
     
     with col1:
-        # Portfolio value over time
+        # Portfolio value over time with controlled data
         portfolio_dates = pd.date_range(start=datetime.now() - timedelta(days=30), end=datetime.now(), freq='D')
-        portfolio_values = np.cumsum(np.random.randn(len(portfolio_dates)) * 100) + 10000
+        
+        # Generate realistic portfolio progression
+        portfolio_values = []
+        current_value = 10000  # Starting value
+        
+        for i in range(len(portfolio_dates)):
+            # Small daily changes instead of cumulative random walk
+            daily_change = np.random.normal(0, 200)  # Average $0 change, $200 std dev
+            current_value = max(current_value + daily_change, 5000)  # Don't go below $5000
+            current_value = min(current_value, 50000)  # Don't go above $50000
+            portfolio_values.append(round(current_value, 2))
         
         if PLOTLY_AVAILABLE:
             fig_portfolio = px.line(
                 x=portfolio_dates,
                 y=portfolio_values,
                 title="Portfolio Value Over Time"
+            )
+            fig_portfolio.update_layout(
+                yaxis_title="Portfolio Value ($)",
+                xaxis_title="Date"
             )
             st.plotly_chart(fig_portfolio, use_container_width=True)
         else:
@@ -479,24 +514,52 @@ with tab4:
     with col2:
         if st.button("📊 Initialize Database", disabled=not st.session_state.supabase_connected):
             if st.session_state.supabase_connected:
-                with st.spinner("Creating database tables..."):
-                    # Create tables for trading app
+                with st.spinner("Testing database access..."):
                     try:
-                        # Note: In real implementation, you would create these tables in Supabase dashboard
-                        # or use migrations. This is just for demonstration.
-                        st.info("""
-                        **Required Tables:**
+                        # Test if we can access the tables
+                        supabase = st.session_state.supabase_client
                         
-                        1. **trades** - Store individual trade records
-                        2. **portfolio_history** - Track portfolio value over time  
-                        3. **settings** - Store user preferences
-                        4. **strategies** - Store trading strategy configurations
+                        # Try to read from settings table
+                        settings_test = supabase.table('settings').select('*').limit(1).execute()
                         
-                        Please create these tables in your Supabase dashboard with appropriate columns.
+                        # Try to read from trades table  
+                        trades_test = supabase.table('trades').select('*').limit(1).execute()
+                        
+                        # Try to read from portfolio_history table
+                        portfolio_test = supabase.table('portfolio_history').select('*').limit(1).execute()
+                        
+                        st.success("✅ All database tables are accessible!")
+                        st.info(f"""
+                        **Database Status:**
+                        - Settings records: {len(settings_test.data)}
+                        - Trade records: {len(trades_test.data)} 
+                        - Portfolio history: {len(portfolio_test.data)}
                         """)
-                        st.success("Database structure information displayed!")
+                        
                     except Exception as e:
-                        st.error(f"Error: {str(e)}")
+                        error_msg = str(e)
+                        if "relation" in error_msg and "does not exist" in error_msg:
+                            st.error("❌ Database tables don't exist yet!")
+                            st.warning("""
+                            **Next Steps:**
+                            1. Go to your Supabase dashboard
+                            2. Open the **SQL Editor**
+                            3. Copy and paste the **simplified schema** from supabase_schema.sql
+                            4. Click **Run** to create the tables
+                            5. Come back and test again
+                            """)
+                        elif "403" in error_msg or "permission" in error_msg.lower():
+                            st.error("❌ Permission denied!")
+                            st.warning("""
+                            **Permission Fix:**
+                            1. Make sure you're using the **anon key** (not service key)
+                            2. Run the simplified SQL schema that grants public access
+                            3. Or temporarily disable RLS in Supabase dashboard
+                            """)
+                        else:
+                            st.error(f"Database error: {error_msg}")
+            else:
+                st.warning("Please connect to Supabase first")
     
     with col3:
         if st.button("💾 Save DB Config"):
